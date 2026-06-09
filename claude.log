@@ -8,31 +8,10 @@
 ● Skill(mcts-td-planner)
   ⎿  Successfully loaded skill
 
-<<<<<<< HEAD
-● Skill(output-phrasing-engineering)
-  ⎿  Successfully loaded skill
-
-● 我将按侦察→分析→执行的流程处理这个任务。
-
-  首先，让我运行语言检测（Step 0），然后对用户需求进行分解。
-
-● Bash(node "C:/Users/cloudmap/.claude/skills/mcts-td-planner/scripts/language_guard.js" detect --message
-=======
   首先，让我运行语言检测（Step 0），然后对用户需求进行分解。
 
 ● Bash(node "~/.claude/skills/mcts-td-planner/scripts/language_guard.js" detect --message
->>>>>>> 132d8f9a608e9996a8a36f08f0b17159345d76ba
-      "我想做一个小游戏 使用mcts技能")
-  ⎿  Error: Exit code 1
-     node:internal/modules/cjs/loader:1459
-       throw err;
-       ^
-
-<<<<<<< HEAD
-     Error: Cannot find module 'C:\Users\cloudmap\.claude\skills\mcts-td-planner\scripts\language_guard.js'
-=======
      Error: Cannot find module '~\.claude\skills\mcts-td-planner\scripts\language_guard.js'
->>>>>>> 132d8f9a608e9996a8a36f08f0b17159345d76ba
          at Module._resolveFilename (node:internal/modules/cjs/loader:1456:15)
          at defaultResolveImpl (node:internal/modules/cjs/loader:1066:19)
          at resolveForCJSWithHooks (node:internal/modules/cjs/loader:1071:22)
@@ -50,22 +29,6 @@
     ① 游戏类型? (棋盘游戏/贪吃蛇/Tetris/迷宫/... ) → 有多个选择 ✓
     ② 技术栈? (Web/CLI/桌面/移动) → 有多个选择 ✓
     ③ MCTS角色? (AI对手/AI玩家/游戏求解器/决策引擎) → 有多个选择 ✓
-<<<<<<< HEAD
-     node:internal/modules/cjs/loader:1459
-       throw err;
-       ^
-
-     Error: Cannot find module 'C:\Users\cloudmap\.claude\skills\mcts-td-planner\scripts\language_guard.js'
-         at Module._resolveFilename (node:internal/modules/cjs/loader:1456:15)
-         at defaultResolveImpl (node:internal/modules/cjs/loader:1066:19)
-         at resolveForCJSWithHooks (node:internal/modules/cjs/loader:1071:22)
-         at Module._load (node:internal/modules/cjs/loader:1242:25)
-     … +8 lines (ctrl+o to expand)
-
-● 语言检测失败（脚本文件不存在），但我可以直接判断：用户使用的是中文。接下来按 MCTS-TD 技能规则进行需求分解。
-=======
->>>>>>> 132d8f9a608e9996a8a36f08f0b17159345d76ba
-
   ---
   Step 0 — 需求分解：
 
@@ -672,8 +635,6 @@
   ---
   方案A 胜出 — 零依赖单HTML文件，打地鼠 + MCTS节奏控制，最适合你的场景。
 
-<<<<<<< HEAD
   要继续进入执行阶段，开始写代码吗？
-=======
-  要继续进入执行阶段，开始写代码吗？
->>>>>>> 132d8f9a608e9996a8a36f08f0b17159345d76ba
+
+
