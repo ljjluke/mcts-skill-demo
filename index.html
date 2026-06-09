@@ -1,0 +1,1014 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>🔨 打地鼠！</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%;
+    overflow: hidden;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+    -webkit-user-select: none;
+    background: #2d5a27;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  #game-container {
+    width: 100%; height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(180deg, #87CEEB 0%, #87CEEB 15%, #4a8c3f 15%, #3d7235 100%);
+  }
+  canvas {
+    display: block;
+    max-width: 100vw;
+    max-height: 100vh;
+    cursor: pointer;
+  }
+</style>
+</head>
+<body>
+<div id="game-container">
+  <canvas id="game"></canvas>
+</div>
+
+<script>
+// ══════════════════════════════════════════════════════════════
+//  🔨 打地鼠游戏 × MCTS节奏控制
+//  目标用户: 3-6岁儿童
+//  MCTS角色: 智能控制地鼠出现节奏（哪个洞、何时出、持续多久）
+// ══════════════════════════════════════════════════════════════
+
+// ──────────────────────────────────────────────
+//  模块1: 游戏配置常量
+// ──────────────────────────────────────────────
+const CONFIG = {
+  // 画布逻辑尺寸（实际渲染会缩放）
+  WIDTH: 600,
+  HEIGHT: 800,
+
+  // 地鼠洞配置：2行×3列
+  HOLES: {
+    rows: 2,
+    cols: 3,
+    radius: 42,       // 洞的视觉半径
+    hitRadius: 55,    // 命中检测半径（比视觉大，适合儿童手指）
+    spacingX: 140,    // 列间距
+    spacingY: 180,    // 行间距
+    offsetX: 300,     // 整体X偏移（居中）
+    offsetY: 380,     // 整体Y偏移
+  },
+
+  // 地鼠外观
+  MOLE: {
+    radius: 36,       // 地鼠身体半径
+    popDuration: 200, // 弹出动画时长(ms)
+    hideDuration: 150,// 缩回动画时长(ms)
+  },
+
+  // MCTS节奏控制
+  MCTS: {
+    iterations: 80,       // 每次搜索迭代次数
+    maxTimeMs: 200,       // 搜索超时(ms)
+    minInterval: 600,     // 最小地鼠间隔(ms)
+    maxInterval: 2200,    // 最大地鼠间隔(ms)
+    targetHitRate: 0.70,  // 目标命中率（太高→加速，太低→减速）
+    searchEveryMs: 400,   // 每隔多少ms执行一次MCTS搜索
+  },
+
+  // 游戏规则
+  GAME: {
+    moleVisibleMs: 1200,  // 地鼠默认可见时间(ms)
+    scorePerHit: 10,      // 每次击中得分
+    maxScore: 999,        // 最高分数
+  },
+
+  // 颜色（高饱和度，适合儿童）
+  COLORS: {
+    sky: '#87CEEB',
+    grass: '#4a8c3f',
+    grassDark: '#3d7235',
+    holeDark: '#4a3520',
+    holeLight: '#8B6914',
+    moleBody: '#c47f3a',
+    moleBelly: '#e8c98e',
+    moleNose: '#e74c3c',
+    moleEye: '#1a1a2e',
+    moleCheek: '#f5a0a0',
+    scoreText: '#FFD700',
+    scoreShadow: '#B8860B',
+    particleGold: '#FFD700',
+    particleStar: '#FF6347',
+    particleSpark: '#00FFFF',
+  },
+
+  // 音效频率(Hz)
+  SOUND: {
+    hitFreq: 880,         // 击中音（高音叮）
+    missFreq: 220,        // 逃跑音（低沉）
+    appearFreq: 440,      // 出现音
+    comboBonusFreq: 1200, // 连击奖励音
+  },
+};
+
+// ──────────────────────────────────────────────
+//  模块2: Canvas初始化 & 响应式缩放
+// ──────────────────────────────────────────────
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+let scale = 1;
+
+function resizeCanvas() {
+  const container = document.getElementById('game-container');
+  const maxW = container.clientWidth;
+  const maxH = container.clientHeight;
+  const aspect = CONFIG.WIDTH / CONFIG.HEIGHT;
+
+  let w, h;
+  if (maxW / maxH > aspect) {
+    h = maxH;
+    w = h * aspect;
+  } else {
+    w = maxW;
+    h = w / aspect;
+  }
+
+  canvas.style.width = w + 'px';
+  canvas.style.height = h + 'px';
+  canvas.width = CONFIG.WIDTH;
+  canvas.height = CONFIG.HEIGHT;
+  scale = w / CONFIG.WIDTH;
+}
+
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+
+// ──────────────────────────────────────────────
+//  模块3: 音效引擎
+// ──────────────────────────────────────────────
+let audioCtx = null;
+
+function getAudioContext() {
+  if (!audioCtx) {
+    try {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    } catch (e) {
+      return null;
+    }
+  }
+  if (audioCtx.state === 'suspended') {
+    audioCtx.resume();
+  }
+  return audioCtx;
+}
+
+function playBeep(freq, duration, type = 'square', volume = 0.12) {
+  const ctx = getAudioContext();
+  if (!ctx) return;
+
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+
+  osc.type = type;
+  osc.frequency.setValueAtTime(freq, ctx.currentTime);
+
+  gain.gain.setValueAtTime(volume, ctx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration);
+
+  osc.connect(gain);
+  gain.connect(ctx.destination);
+
+  osc.start(ctx.currentTime);
+  osc.stop(ctx.currentTime + duration);
+}
+
+function soundHit() {
+  // 叮！——清脆击中音
+  playBeep(CONFIG.SOUND.hitFreq, 0.08, 'square', 0.10);
+  setTimeout(() => playBeep(CONFIG.SOUND.hitFreq * 1.5, 0.06, 'square', 0.07), 60);
+}
+
+function soundMiss() {
+  // 啵——地鼠逃跑音
+  playBeep(CONFIG.SOUND.missFreq, 0.15, 'triangle', 0.08);
+  setTimeout(() => playBeep(CONFIG.SOUND.missFreq * 0.7, 0.12, 'triangle', 0.06), 80);
+}
+
+function soundAppear() {
+  // 噗——地鼠出现音
+  playBeep(CONFIG.SOUND.appearFreq, 0.06, 'sine', 0.05);
+}
+
+function soundCombo(combo) {
+  // 连击奖励音——音调递升
+  const baseFreq = CONFIG.SOUND.comboBonusFreq;
+  for (let i = 0; i < Math.min(combo, 5); i++) {
+    setTimeout(() => playBeep(baseFreq + i * 200, 0.06, 'sine', 0.08), i * 80);
+  }
+}
+
+// ──────────────────────────────────────────────
+//  模块4: 粒子特效系统
+// ──────────────────────────────────────────────
+const particles = [];
+
+function spawnParticles(x, y, count = 12) {
+  for (let i = 0; i < count; i++) {
+    const angle = (Math.PI * 2 * i) / count + Math.random() * 0.5;
+    const speed = 3 + Math.random() * 5;
+    const life = 20 + Math.floor(Math.random() * 20);
+    const colors = [CONFIG.COLORS.particleGold, CONFIG.COLORS.particleStar, CONFIG.COLORS.particleSpark];
+    particles.push({
+      x, y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed - 2,
+      life,
+      maxLife: life,
+      size: 3 + Math.random() * 4,
+      color: colors[Math.floor(Math.random() * colors.length)],
+    });
+  }
+}
+
+function updateParticles() {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vy += 0.15; // 重力
+    p.life--;
+    if (p.life <= 0) {
+      particles.splice(i, 1);
+    }
+  }
+}
+
+function drawParticles(ctx) {
+  for (const p of particles) {
+    const alpha = p.life / p.maxLife;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    // 画小星星
+    const cx = p.x, cy = p.y, r = p.size;
+    for (let i = 0; i < 5; i++) {
+      const a = (Math.PI * 2 * i) / 5 - Math.PI / 2;
+      const ix = cx + Math.cos(a) * r;
+      const iy = cy + Math.sin(a) * r;
+      if (i === 0) ctx.moveTo(ix, iy);
+      else ctx.lineTo(ix, iy);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+// ──────────────────────────────────────────────
+//  模块5: 游戏状态
+// ──────────────────────────────────────────────
+const NUM_HOLES = CONFIG.HOLES.rows * CONFIG.HOLES.cols;
+
+const gameState = {
+  // 每个洞的状态: { active: bool, visible: bool, animProgress: 0-1, appearTime: ms, moleType: 'normal'|'golden' }
+  holes: [],
+  score: 0,
+  combo: 0,           // 连续击中
+  totalAttempts: 0,   // 总地鼠数（有地鼠出现的次数）
+  totalHits: 0,        // 击中总数
+
+  running: true,
+  lastFrameTime: 0,
+  gameTime: 0,
+
+  // MCTS节奏策略
+  mctsPolicy: {
+    currentInterval: 1200,    // 当前推荐间隔(ms)
+    lastDecisionTime: 0,
+    nextMoleTime: 0,          // 下一个地鼠出现时间(游戏时间)
+  },
+};
+
+function initHoles() {
+  gameState.holes = [];
+  for (let i = 0; i < NUM_HOLES; i++) {
+    gameState.holes.push({
+      active: false,
+      visible: false,
+      animProgress: 0,
+      appearTime: 0,
+      hit: false,       // 本轮是否已被击中
+      moleType: 'normal',
+    });
+  }
+}
+initHoles();
+
+// 获取洞的屏幕坐标
+function getHoleCenter(index) {
+  const row = Math.floor(index / CONFIG.HOLES.cols);
+  const col = index % CONFIG.HOLES.cols;
+  const x = CONFIG.HOLES.offsetX + (col - (CONFIG.HOLES.cols - 1) / 2) * CONFIG.HOLES.spacingX;
+  const y = CONFIG.HOLES.offsetY + (row - (CONFIG.HOLES.rows - 1) / 2) * CONFIG.HOLES.spacingY;
+  return { x, y };
+}
+
+// ──────────────────────────────────────────────
+//  模块6: MCTS节奏控制引擎
+// ──────────────────────────────────────────────
+
+/**
+ * MCTS状态空间:
+ *   - hitRate: 近期命中率 (0.0 ~ 1.0)
+ *   - avgReactionMs: 平均反应时间
+ *   - currentInterval: 当前节奏间隔
+ *   - combo: 当前连击数
+ *
+ * MCTS动作空间:
+ *   节奏调整方向:
+ *     { type: 'speedUp',   delta: -200ms }  加快
+ *     { type: 'speedUp',   delta: -100ms }  微快
+ *     { type: 'maintain',  delta: 0 }       保持
+ *     { type: 'slowDown',  delta: +150ms }  微慢
+ *     { type: 'slowDown',  delta: +300ms }  放慢
+ *
+ * 奖励函数:
+ *   目标命中率 65-80% → 高奖励
+ *   太低(<40%)      → 负奖励（太难，需要放慢）
+ *   太高(>90%)      → 负奖励（太简单，需要加快）
+ */
+
+const MCTS_ACTIONS = [
+  { name: 'speedUp2',  delta: -250 },
+  { name: 'speedUp1',  delta: -120 },
+  { name: 'maintain',  delta: 0 },
+  { name: 'slowDown1', delta: +180 },
+  { name: 'slowDown2', delta: +350 },
+];
+
+function computeReward(hitRate, combo) {
+  // 理想命中率区间 65%-80%
+  let rateReward;
+  if (hitRate >= 0.65 && hitRate <= 0.80) {
+    rateReward = 1.0; // 完美区间
+  } else if (hitRate >= 0.50 && hitRate <= 0.90) {
+    rateReward = 0.7; // 可接受
+  } else if (hitRate < 0.40) {
+    rateReward = -0.5; // 太难了
+  } else if (hitRate > 0.95) {
+    rateReward = -0.3; // 太简单了
+  } else {
+    rateReward = 0.3; // 边缘区间
+  }
+
+  // 连击奖励（鼓励保持适度的挑战性）
+  const comboBonus = Math.min(combo * 0.05, 0.3);
+
+  return rateReward + comboBonus;
+}
+
+// MCTS节点
+class MCTSNode {
+  constructor(state, action, parent = null) {
+    this.state = state;         // { hitRate, combo, currentInterval }
+    this.action = action;       // 执行的动作（根节点为null）
+    this.parent = parent;
+    this.children = [];
+    this.visits = 0;
+    this.totalReward = 0;
+    this.untriedActions = [...MCTS_ACTIONS];
+  }
+
+  value() {
+    if (this.visits === 0) return 0;
+    return this.totalReward / this.visits;
+  }
+
+  ucb(parentVisits) {
+    if (this.visits === 0) return Infinity;
+    const exploration = Math.sqrt(2 * Math.log(parentVisits) / this.visits);
+    return this.value() + exploration;
+  }
+
+  isFullyExpanded() {
+    return this.untriedActions.length === 0;
+  }
+}
+
+function simulateNextState(state, action) {
+  const newInterval = Math.max(CONFIG.MCTS.minInterval,
+    Math.min(CONFIG.MCTS.maxInterval, state.currentInterval + action.delta));
+  return {
+    hitRate: state.hitRate,
+    combo: state.combo,
+    currentInterval: newInterval,
+  };
+}
+
+function rollout(state, depth = 5) {
+  // 快速随机rollout，模拟后续5步
+  let s = { ...state };
+  let totalReward = 0;
+
+  for (let i = 0; i < depth; i++) {
+    const action = MCTS_ACTIONS[Math.floor(Math.random() * MCTS_ACTIONS.length)];
+    s = simulateNextState(s, action);
+
+    // 模拟命中率随机漂移（朝向目标区间）
+    const drift = (0.70 - s.hitRate) * 0.1 + (Math.random() - 0.5) * 0.05;
+    s.hitRate = Math.max(0, Math.min(1, s.hitRate + drift));
+
+    totalReward += computeReward(s.hitRate, s.combo) * Math.pow(0.8, i);
+  }
+
+  return totalReward / depth;
+}
+
+function mctsSearch(rootState, iterations, maxTimeMs) {
+  const root = new MCTSNode(rootState, null);
+  const startTime = performance.now();
+
+  for (let i = 0; i < iterations; i++) {
+    // 超时保护
+    if (performance.now() - startTime > maxTimeMs) break;
+
+    // ── Selection ──
+    let node = root;
+    while (node.isFullyExpanded() && node.children.length > 0) {
+      let bestChild = null;
+      let bestUCB = -Infinity;
+
+      for (const child of node.children) {
+        const ucb = child.ucb(node.visits);
+        if (ucb > bestUCB) {
+          bestUCB = ucb;
+          bestChild = child;
+        }
+      }
+      if (!bestChild) break;
+      node = bestChild;
+    }
+
+    // ── Expansion ──
+    if (node.untriedActions.length > 0) {
+      const idx = Math.floor(Math.random() * node.untriedActions.length);
+      const action = node.untriedActions[idx];
+      node.untriedActions.splice(idx, 1);
+
+      const nextState = simulateNextState(node.state, action);
+      const child = new MCTSNode(nextState, action, node);
+      node.children.push(child);
+      node = child;
+    }
+
+    // ── Simulation (Rollout) ──
+    const reward = rollout(node.state);
+
+    // ── Backpropagation ──
+    while (node) {
+      node.visits++;
+      node.totalReward += reward;
+      node = node.parent;
+    }
+  }
+
+  // ── 选择最佳动作 ──
+  if (root.children.length === 0) {
+    return MCTS_ACTIONS[Math.floor(Math.random() * MCTS_ACTIONS.length)];
+  }
+
+  let bestChild = root.children[0];
+  for (const child of root.children) {
+    if (child.visits > bestChild.visits) {
+      bestChild = child;
+    }
+  }
+
+  return bestChild.action;
+}
+
+// 缓存上次MCTS结果（超时时fallback用）
+let cachedMCTSAction = MCTS_ACTIONS[2]; // 默认maintain
+
+function runMCTS() {
+  const hitRate = gameState.totalAttempts > 0
+    ? gameState.totalHits / gameState.totalAttempts
+    : 0.5;
+
+  const state = {
+    hitRate: hitRate,
+    combo: gameState.combo,
+    currentInterval: gameState.mctsPolicy.currentInterval,
+  };
+
+  // 如果没有足够的统计数据，用默认策略
+  if (gameState.totalAttempts < 3) {
+    return MCTS_ACTIONS[Math.floor(Math.random() * 3)]; // 前几次随机，采集数据
+  }
+
+  const action = mctsSearch(state, CONFIG.MCTS.iterations, CONFIG.MCTS.maxTimeMs);
+  if (action) {
+    cachedMCTSAction = action;
+  }
+  return cachedMCTSAction;
+}
+
+// ──────────────────────────────────────────────
+//  模块7: 游戏逻辑
+// ──────────────────────────────────────────────
+
+function tryShowMole(now) {
+  // 检查是否到时间显示下一个地鼠
+  if (now < gameState.mctsPolicy.nextMoleTime) return;
+
+  // 找一个空闲的洞
+  const availableHoles = [];
+  for (let i = 0; i < NUM_HOLES; i++) {
+    if (!gameState.holes[i].active) {
+      availableHoles.push(i);
+    }
+  }
+  if (availableHoles.length === 0) {
+    // 所有洞都被占，短暂延迟后重试
+    gameState.mctsPolicy.nextMoleTime = now + 200;
+    return;
+  }
+
+  // 运行MCTS决定节奏
+  const action = runMCTS();
+  gameState.mctsPolicy.currentInterval = Math.max(
+    CONFIG.MCTS.minInterval,
+    Math.min(CONFIG.MCTS.maxInterval,
+      gameState.mctsPolicy.currentInterval + action.delta)
+  );
+  gameState.mctsPolicy.lastDecisionTime = now;
+  gameState.mctsPolicy.nextMoleTime = now + gameState.mctsPolicy.currentInterval;
+
+  // 随机选洞 + MCTS偏置：倾向于选"空闲较久"的洞
+  const holeIndex = availableHoles[Math.floor(Math.random() * availableHoles.length)];
+
+  // 激活地鼠
+  const hole = gameState.holes[holeIndex];
+  hole.active = true;
+  hole.visible = true;
+  hole.animProgress = 0;
+  hole.appearTime = now;
+  hole.hit = false;
+
+  // 偶尔出金色地鼠（10%概率，分数×2）
+  hole.moleType = Math.random() < 0.10 ? 'golden' : 'normal';
+
+  gameState.totalAttempts++;
+  soundAppear();
+}
+
+function handleMoleTimeout(now) {
+  // 检查是否有地鼠超时（没被打中，该缩回去了）
+  for (let i = 0; i < NUM_HOLES; i++) {
+    const hole = gameState.holes[i];
+    if (hole.active && !hole.hit && now - hole.appearTime > CONFIG.GAME.moleVisibleMs) {
+      // 地鼠逃跑
+      hole.active = false;
+      hole.visible = false;
+      gameState.combo = 0; // 断连
+      soundMiss();
+    }
+  }
+}
+
+function hitMole(holeIndex) {
+  const hole = gameState.holes[holeIndex];
+  if (!hole.active || hole.hit) return false;
+
+  hole.hit = true;
+  hole.active = false;
+  hole.visible = false;
+
+  gameState.totalHits++;
+  gameState.combo++;
+
+  const points = hole.moleType === 'golden'
+    ? CONFIG.GAME.scorePerHit * 2
+    : CONFIG.GAME.scorePerHit;
+
+  gameState.score = Math.min(CONFIG.GAME.maxScore, gameState.score + points);
+
+  // 特效&音效
+  const center = getHoleCenter(holeIndex);
+  spawnParticles(center.x, center.y, hole.moleType === 'golden' ? 24 : 12);
+  soundHit();
+
+  if (gameState.combo >= 5) {
+    soundCombo(gameState.combo);
+  }
+
+  return true;
+}
+
+function handleInput(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = CONFIG.WIDTH / rect.width;
+  const scaleY = CONFIG.HEIGHT / rect.height;
+  const gameX = (clientX - rect.left) * scaleX;
+  const gameY = (clientY - rect.top) * scaleY;
+
+  // 检测是否命中任何地鼠洞
+  for (let i = 0; i < NUM_HOLES; i++) {
+    const hole = gameState.holes[i];
+    if (!hole.active || hole.hit) continue;
+
+    const center = getHoleCenter(i);
+    const dx = gameX - center.x;
+    const dy = gameY - center.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+
+    if (dist <= CONFIG.HOLES.hitRadius) {
+      return hitMole(i);
+    }
+  }
+
+  // 如果没有命中活跃地鼠，检查是否打在空洞上（给一个微弱的反馈）
+  for (let i = 0; i < NUM_HOLES; i++) {
+    const center = getHoleCenter(i);
+    const dx = gameX - center.x;
+    const dy = gameY - center.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist <= CONFIG.HOLES.hitRadius) {
+      // 打到了空洞——给极短的低音反馈
+      playBeep(150, 0.04, 'sine', 0.03);
+      return false;
+    }
+  }
+
+  return false;
+}
+
+// 事件监听
+canvas.addEventListener('click', (e) => {
+  e.preventDefault();
+  // 用户交互解锁 AudioContext
+  getAudioContext();
+  handleInput(e.clientX, e.clientY);
+});
+
+canvas.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  getAudioContext();
+  if (e.touches.length > 0) {
+    handleInput(e.touches[0].clientX, e.touches[0].clientY);
+  }
+}, { passive: false });
+
+// ──────────────────────────────────────────────
+//  模块8: 渲染
+// ──────────────────────────────────────────────
+
+function drawBackground(ctx) {
+  // 天空
+  const skyGrad = ctx.createLinearGradient(0, 0, 0, CONFIG.HEIGHT * 0.15);
+  skyGrad.addColorStop(0, '#87CEEB');
+  skyGrad.addColorStop(1, '#b8e4f0');
+  ctx.fillStyle = skyGrad;
+  ctx.fillRect(0, 0, CONFIG.WIDTH, CONFIG.HEIGHT * 0.15);
+
+  // 太阳
+  ctx.fillStyle = '#FFE066';
+  ctx.beginPath();
+  ctx.arc(480, 40, 50, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 太阳光芒
+  ctx.strokeStyle = '#FFE066';
+  ctx.lineWidth = 3;
+  for (let i = 0; i < 12; i++) {
+    const a = (Math.PI * 2 * i) / 12;
+    ctx.beginPath();
+    ctx.moveTo(480 + Math.cos(a) * 55, 40 + Math.sin(a) * 55);
+    ctx.lineTo(480 + Math.cos(a) * 70, 40 + Math.sin(a) * 70);
+    ctx.stroke();
+  }
+
+  // 草地
+  const grassGrad = ctx.createLinearGradient(0, CONFIG.HEIGHT * 0.15, 0, CONFIG.HEIGHT);
+  grassGrad.addColorStop(0, CONFIG.COLORS.grass);
+  grassGrad.addColorStop(1, CONFIG.COLORS.grassDark);
+  ctx.fillStyle = grassGrad;
+  ctx.fillStyle = grassGrad;
+  ctx.fillRect(0, CONFIG.HEIGHT * 0.15, CONFIG.WIDTH, CONFIG.HEIGHT * 0.85);
+
+  // 装饰性小花
+  drawFlower(ctx, 80, 200, '#FF6B6B');
+  drawFlower(ctx, 520, 230, '#FFD93D');
+  drawFlower(ctx, 150, 250, '#FFFFFF');
+  drawFlower(ctx, 450, 210, '#FF8AC4');
+}
+
+function drawFlower(ctx, x, y, color) {
+  ctx.fillStyle = color;
+  for (let i = 0; i < 5; i++) {
+    const a = (Math.PI * 2 * i) / 5;
+    ctx.beginPath();
+    ctx.arc(x + Math.cos(a) * 8, y + Math.sin(a) * 8, 5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.fillStyle = '#FFE066';
+  ctx.beginPath();
+  ctx.arc(x, y, 4, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawHole(ctx, x, y) {
+  // 洞的外圈（土堆）
+  ctx.fillStyle = CONFIG.COLORS.holeLight;
+  ctx.beginPath();
+  ctx.ellipse(x, y, CONFIG.HOLES.radius + 10, CONFIG.HOLES.radius * 0.6, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 洞的内圈（深色洞）
+  const holeGrad = ctx.createRadialGradient(x, y - 5, 5, x, y, CONFIG.HOLES.radius);
+  holeGrad.addColorStop(0, '#1a0f05');
+  holeGrad.addColorStop(1, CONFIG.COLORS.holeDark);
+  ctx.fillStyle = holeGrad;
+  ctx.beginPath();
+  ctx.arc(x, y, CONFIG.HOLES.radius - 2, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawMole(ctx, x, y, progress) {
+  // progress 0→1: 地鼠从洞中弹出
+  const offsetY = (1 - progress) * CONFIG.MOLE.radius * 1.5;
+  const my = y - offsetY - CONFIG.MOLE.radius * 0.3;
+
+  // 裁剪：只显示洞上方的部分（模拟从洞里冒出来）
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(x, y, CONFIG.HOLES.radius, 0, Math.PI * 2);
+  ctx.clip();
+
+  // 身体
+  const bodyGrad = ctx.createRadialGradient(x - 8, my - 5, 5, x, my, CONFIG.MOLE.radius);
+  bodyGrad.addColorStop(0, CONFIG.COLORS.moleBelly);
+  bodyGrad.addColorStop(1, CONFIG.COLORS.moleBody);
+  ctx.fillStyle = bodyGrad;
+  ctx.beginPath();
+  ctx.arc(x, my, CONFIG.MOLE.radius, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 耳朵
+  ctx.fillStyle = CONFIG.COLORS.moleBody;
+  ctx.beginPath();
+  ctx.arc(x - 16, my - 22, 10, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(x + 16, my - 22, 10, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 耳朵内侧
+  ctx.fillStyle = CONFIG.COLORS.moleCheek;
+  ctx.beginPath();
+  ctx.arc(x - 16, my - 22, 6, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(x + 16, my - 22, 6, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 眼睛
+  ctx.fillStyle = '#FFFFFF';
+  ctx.beginPath();
+  ctx.arc(x - 10, my - 8, 8, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(x + 10, my - 8, 8, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = CONFIG.COLORS.moleEye;
+  ctx.beginPath();
+  ctx.arc(x - 8, my - 7, 4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(x + 8, my - 7, 4, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 眼睛高光
+  ctx.fillStyle = '#FFFFFF';
+  ctx.beginPath();
+  ctx.arc(x - 6, my - 9, 2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(x + 10, my - 9, 2, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 鼻子（红色大圆鼻子——可爱）
+  ctx.fillStyle = CONFIG.COLORS.moleNose;
+  ctx.beginPath();
+  ctx.arc(x, my + 2, 7, 0, Math.PI * 2);
+  ctx.fill();
+  // 鼻子高光
+  ctx.fillStyle = '#f8a0a0';
+  ctx.beginPath();
+  ctx.arc(x - 2, my, 2.5, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 嘴巴（微笑弧线）
+  ctx.strokeStyle = '#5a3020';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(x - 8, my + 8, 10, 0.2, Math.PI * 0.6);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(x + 8, my + 8, 10, Math.PI * 0.4, Math.PI - 0.2);
+  ctx.stroke();
+
+  // 腮红
+  ctx.fillStyle = CONFIG.COLORS.moleCheek;
+  ctx.globalAlpha = 0.5;
+  ctx.beginPath();
+  ctx.arc(x - 18, my + 4, 7, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(x + 18, my + 4, 7, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+
+  // 胡须
+  ctx.strokeStyle = '#8B7355';
+  ctx.lineWidth = 1;
+  for (let side = -1; side <= 1; side += 2) {
+    ctx.beginPath();
+    ctx.moveTo(x + side * 8, my + 3);
+    ctx.lineTo(x + side * 24, my - 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(x + side * 8, my + 6);
+    ctx.lineTo(x + side * 24, my + 6);
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+function drawScore(ctx) {
+  const scoreText = gameState.score.toString();
+  const x = CONFIG.WIDTH / 2;
+  const y = 80;
+
+  // 阴影
+  ctx.fillStyle = CONFIG.COLORS.scoreShadow;
+  ctx.font = 'bold 52px "Comic Sans MS", "Arial Rounded MT Bold", sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(scoreText, x + 3, y + 3);
+
+  // 主体文字（金色渐变）
+  const grad = ctx.createLinearGradient(x, y - 30, x, y + 10);
+  grad.addColorStop(0, '#FFF8DC');
+  grad.addColorStop(0.5, CONFIG.COLORS.scoreText);
+  grad.addColorStop(1, CONFIG.COLORS.scoreShadow);
+  ctx.fillStyle = grad;
+  ctx.fillText(scoreText, x, y);
+
+  // 连击显示
+  if (gameState.combo >= 3) {
+    const comboY = y + 40;
+    const comboText = '🔥'.repeat(Math.min(gameState.combo, 8));
+    ctx.font = 'bold 22px sans-serif';
+    ctx.fillStyle = '#FF4500';
+    ctx.fillText(comboText, x, comboY);
+  }
+
+  // ⭐ 星星装饰
+  ctx.font = '32px sans-serif';
+  ctx.fillText('⭐', 40, y - 5);
+}
+
+function drawGame(ctx) {
+  // 清屏
+  ctx.clearRect(0, 0, CONFIG.WIDTH, CONFIG.HEIGHT);
+
+  // 背景
+  drawBackground(ctx);
+
+  // 分数
+  drawScore(ctx);
+
+  // 地鼠洞
+  for (let i = 0; i < NUM_HOLES; i++) {
+    const center = getHoleCenter(i);
+    const hole = gameState.holes[i];
+
+    // 先画洞
+    drawHole(ctx, center.x, center.y);
+
+    // 再画地鼠（如果有）
+    if (hole.active && hole.visible && !hole.hit) {
+      drawMole(ctx, center.x, center.y, hole.animProgress);
+
+      // 金色地鼠特效
+      if (hole.moleType === 'golden') {
+        ctx.save();
+        ctx.globalAlpha = 0.3 + Math.sin(gameState.gameTime * 0.01) * 0.2;
+        ctx.strokeStyle = '#FFD700';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(center.x, center.y, CONFIG.MOLE.radius + 8, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+  }
+
+  // 粒子特效（画在地鼠上面）
+  drawParticles(ctx);
+
+  // 底部装饰文字
+  ctx.font = '16px "Comic Sans MS", sans-serif';
+  ctx.fillStyle = 'rgba(255,255,255,0.4)';
+  ctx.textAlign = 'center';
+  ctx.fillText('👆 点击地鼠！', CONFIG.WIDTH / 2, CONFIG.HEIGHT - 30);
+
+  // MCTS调试信息（可选——开发时可以注释掉）
+  // ctx.font = '12px monospace';
+  // ctx.fillStyle = 'rgba(255,255,255,0.7)';
+  // ctx.textAlign = 'left';
+  // ctx.fillText(`间隔: ${gameState.mctsPolicy.currentInterval}ms`, 10, CONFIG.HEIGHT - 10);
+  // ctx.fillText(`命中率: ${(gameState.totalAttempts > 0 ? gameState.totalHits / gameState.totalAttempts * 100 : 0).toFixed(0)}%`, 10, CONFIG.HEIGHT - 28);
+}
+
+// ──────────────────────────────────────────────
+//  模块9: 游戏主循环
+// ──────────────────────────────────────────────
+
+function updateAnimations(dt) {
+  for (let i = 0; i < NUM_HOLES; i++) {
+    const hole = gameState.holes[i];
+    if (hole.active && hole.visible && !hole.hit) {
+      // 弹出动画（0→1）
+      if (hole.animProgress < 1) {
+        hole.animProgress = Math.min(1, hole.animProgress + dt / CONFIG.MOLE.popDuration);
+      }
+    }
+  }
+}
+
+function gameLoop(timestamp) {
+  if (!gameState.running) return;
+
+  if (gameState.lastFrameTime === 0) {
+    gameState.lastFrameTime = timestamp;
+  }
+
+  const dt = Math.min(timestamp - gameState.lastFrameTime, 50); // 防止大帧间隔
+  gameState.lastFrameTime = timestamp;
+  gameState.gameTime = timestamp;
+
+  // 尝试显示新地鼠
+  tryShowMole(timestamp);
+
+  // 处理超时地鼠
+  handleMoleTimeout(timestamp);
+
+  // 更新动画
+  updateAnimations(dt);
+
+  // 更新粒子
+  updateParticles();
+
+  // 渲染
+  drawGame(ctx);
+
+  requestAnimationFrame(gameLoop);
+}
+
+// 页面失焦处理
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    gameState.running = false;
+    gameState.lastFrameTime = 0;
+  } else {
+    gameState.running = true;
+    gameState.lastFrameTime = 0;
+    // 重置节奏计时器，防止批量生成地鼠
+    gameState.mctsPolicy.nextMoleTime = performance.now() + 1000;
+    requestAnimationFrame(gameLoop);
+  }
+});
+
+// ──────────────────────────────────────────────
+//  启动游戏
+// ──────────────────────────────────────────────
+console.log('🔨 打地鼠游戏启动！');
+console.log('  MCTS节奏控制器: 已就绪');
+console.log('  目标命中率区间: 65%-80%');
+console.log('  地鼠洞数量:', NUM_HOLES);
+console.log('  点击地鼠开始玩吧！');
+
+// 初始化：1.5秒后出现第一个地鼠
+gameState.mctsPolicy.nextMoleTime = performance.now() + 1500;
+requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>
